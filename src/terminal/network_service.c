@@ -982,7 +982,7 @@ static GF_InputService *gf_term_can_handle_service(GF_Terminal *term, const char
 		ext = anext;
 	}
 	/*no mime type: either local or streaming. If streaming discard extension checking*/
-	if (!ifce && !mime_type && strstr(sURL, "://") && strnicmp(sURL, "file://", 7)) ext = NULL;
+	//if (!ifce && !mime_type && strstr(sURL, "://") && strnicmp(sURL, "file://", 7)) ext = NULL;
 
 	/*browse extensions for prefered module*/
 	if (!ifce && ext) {
