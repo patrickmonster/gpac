@@ -50,6 +50,9 @@
 /*set to 1 if you want MPD to use SegmentTemplate if possible instead of SegmentList*/
 #define M3U8_TO_MPD_USE_TEMPLATE	0
 
+#define GF_BUFFER_CACHED_SIZE 15
+#define GF_BUFFER_CACHED_SIZE_AC 2
+
 typedef enum {
 	GF_DASH_STATE_STOPPED = 0,
 	/*period setup and playback chain creation*/
@@ -256,7 +259,7 @@ struct __dash_group
 
 	/*next file (cached) to delete at next GF_NET_SERVICE_QUERY_NEXT for this group*/
 	char * urlToDeleteNext;
-	volatile u32 max_cached_segments, nb_cached_segments, max_buffer_segments;
+	volatile u32 max_cached_segments,ac_cached_segments, nb_cached_segments, max_buffer_segments;
 	segment_cache_entry *cached;
 
 	GF_DASHFileIOSession segment_download;
@@ -2364,7 +2367,7 @@ static void gf_dash_set_group_representation(GF_DASH_Group *group, GF_MPD_Repres
 	u32 nb_segs;
 	u32 i = gf_list_find(group->adaptation_set->representations, rep);
 	u32 prev_active_rep_index = group->active_rep_index;
-	u32 nb_cached_seg_per_rep = group->max_cached_segments / gf_dash_group_count_rep_needed(group);
+	u32 nb_cached_seg_per_rep = group->ac_cached_segments / gf_dash_group_count_rep_needed(group);
 	assert((s32) i >= 0);
 
 	/* in case of dependent representations: we set max_complementary_rep_index than active_rep_index*/
@@ -2373,7 +2376,7 @@ static void gf_dash_set_group_representation(GF_DASH_Group *group, GF_MPD_Repres
 	else
 		group->active_rep_index = i;
 	group->active_bitrate = rep->bandwidth;
-	group->max_cached_segments = nb_cached_seg_per_rep * gf_dash_group_count_rep_needed(group);
+	group->ac_cached_segments = nb_cached_seg_per_rep * gf_dash_group_count_rep_needed(group);
 	nb_segs = group->nb_segments_in_rep;
 
 	group->min_bandwidth_selected = GF_TRUE;
@@ -2787,7 +2790,7 @@ static GF_Err dash_do_rate_monitor_default(GF_DashClient *dash, GF_DASH_Group *g
 
 	GF_LOG(GF_LOG_WARNING, GF_LOG_DASH, ("[DASH] Downloading from set #%d at rate %d kbps but "
 			"media bitrate is %d kbps - %d/%d in cache - killing connection and "
-			"switching\n", set_idx, download_rate/1024, group->active_bitrate/1024, group->nb_cached_segments, group->max_cached_segments ));
+			"switching\n", set_idx, download_rate/1024, group->active_bitrate/1024, group->nb_cached_segments, group->ac_cached_segments ));
 
 	group->download_abort_type = 2;
 	group->dash->dash_io->abort(group->dash->dash_io, group->segment_download);
@@ -2974,7 +2977,7 @@ static s32 dash_do_rate_adaptation_legacy_buffer(GF_DashClient *dash, GF_DASH_Gr
 	/* buffer_max_ms is non-null when the adaptation algorithm requires buffer information (e.g. GF_DASH_ALGO_GPAC_LEGACY_BUFFER ) */
 	/* if the cache is full (i.e. player did not fetch downloaded data yet)
 	   if we are below half of the buffer don't try to go up and limit rate to less than our current rep bandwidth*/
-	if (group->buffer_max_ms && (group->nb_cached_segments<group->max_cached_segments)) {
+	if (group->buffer_max_ms && (group->nb_cached_segments<group->ac_cached_segments)) {
 		u32 buf_high_threshold, buf_low_threshold;
 		s32 occ;
 
@@ -3670,10 +3673,10 @@ static GF_Err gf_dash_download_init_segment(GF_DashClient *dash, GF_DASH_Group *
 		if (dash->mpd->type==GF_MPD_TYPE_STATIC) {
 			GF_LOG(GF_LOG_ERROR, GF_LOG_DASH, ("[DASH] 0 segments in static representation (MPD duration "LLU", will probably have 404\n", group->dash->mpd->media_presentation_duration));
 		}
-	} else if (!group->groups_depending_on &&  (group->nb_segments_in_rep < group->max_cached_segments)) {
-		GF_LOG(GF_LOG_INFO, GF_LOG_DASH, ("[DASH] Resizing to %u max_cached_segments elements instead of %u.\n", group->nb_segments_in_rep, group->max_cached_segments));
+	} else if (!group->groups_depending_on &&  (group->nb_segments_in_rep < group->ac_cached_segments)) {
+		GF_LOG(GF_LOG_INFO, GF_LOG_DASH, ("[DASH] Resizing to %u ac_cached_segments elements instead of %u.\n", group->nb_segments_in_rep, group->ac_cached_segments));
 		/* OK, we have a problem, it may ends download */
-		group->max_cached_segments = group->nb_segments_in_rep;
+		group->ac_cached_segments = group->nb_segments_in_rep;
 	}
 
 	/* Mime-Type check */
@@ -4196,7 +4199,8 @@ GF_Err gf_dash_setup_groups(GF_DashClient *dash)
 			group->cache_duration = dash->mpd->min_buffer_time;
 
 		//we want at least 2 segments available in the cache, in order to perform rate adaptation with one cache ahead
-		group->max_cached_segments = 2;
+		group->max_cached_segments = GF_BUFFER_CACHED_SIZE;
+		group->ac_cached_segments = GF_BUFFER_CACHED_SIZE_AC;
 		if (seg_dur) {
 			while (group->max_cached_segments * seg_dur * 1000 < group->cache_duration)
 				group->max_cached_segments ++;
@@ -4212,6 +4216,7 @@ GF_Err gf_dash_setup_groups(GF_DashClient *dash)
 			}
 #endif
 			group->max_cached_segments *= (nb_dependant_rep+1);
+			group->ac_cached_segments *= (nb_dependant_rep+1);
 			group->max_buffer_segments *= (nb_dependant_rep+1);
 		}
 
@@ -4258,6 +4263,7 @@ GF_Err gf_dash_setup_groups(GF_DashClient *dash)
 			u32 nb_dep_groups = gf_list_count(group->groups_depending_on);
 			//all dependent groups will be stored in the base group
 			group->max_cached_segments *= (1+nb_dep_groups);
+			group->ac_cached_segments *= (1+nb_dep_groups);
 			group->max_buffer_segments *= (1+nb_dep_groups);
 			group->cached = gf_realloc(group->cached, sizeof(segment_cache_entry)*group->max_cached_segments);
 			memset(group->cached, 0, sizeof(segment_cache_entry)*group->max_cached_segments);
@@ -4274,8 +4280,36 @@ GF_Err gf_dash_setup_groups(GF_DashClient *dash)
 			}
 		}
 	}
-
+	gf_dash_buffer_change_cached(dash,4);
 	return GF_OK;
+}
+
+void gf_dash_buffer_change_cached(GF_DashClient *dash,u32 size){
+	u32 count, i;
+	if(size > GF_BUFFER_CACHED_SIZE){
+		GF_LOG(GF_LOG_ERROR, GF_LOG_DASH, ("[DASH] 최대 버퍼사이즈 : %d\n",
+					 GF_BUFFER_CACHED_SIZE));
+		size = GF_BUFFER_CACHED_SIZE;
+	}
+	if(size < 1){	
+		GF_LOG(GF_LOG_ERROR, GF_LOG_DASH, ("[DASH] 최소 버퍼사이즈 : %d\n", 1));
+		size = 1;
+	}
+	count = gf_list_count(dash->groups);
+	for (i=0; i<count; i++) {
+		GF_DASH_Group *group = gf_list_get(dash->groups, i);
+		group->ac_cached_segments = size;
+	}
+	for (i=0; i<count; i++) {
+		GF_DASH_Group *group = gf_list_get(dash->groups, i);
+		if (group->groups_depending_on) {
+			u32 nb_dep_groups = gf_list_count(group->groups_depending_on);
+			group->ac_cached_segments *= (1+nb_dep_groups);
+			GF_LOG(GF_LOG_ERROR, GF_LOG_DASH, ("[DASH] 버퍼 크기지정 (%d / %d / %d)\n", 
+					size, group->ac_cached_segments,group->max_cached_segments));
+		}
+	}
+
 }
 
 static GF_Err gf_dash_load_sidx(GF_BitStream *bs, GF_MPD_Representation *rep, Bool seperate_index, u64 sidx_offset)
@@ -5546,7 +5580,7 @@ static DownloadGroupStatus dash_download_group_download(GF_DashClient *dash, GF_
 
 	if (group->selection != GF_DASH_GROUP_SELECTED) return GF_DASH_DownloadSuccess;
 
-	if (base_group->nb_cached_segments>=base_group->max_cached_segments) {
+	if (base_group->nb_cached_segments>=base_group->ac_cached_segments) {
 		return GF_DASH_DownloadCancel;
 	}
 
@@ -5744,6 +5778,15 @@ static DownloadGroupStatus dash_download_group_download(GF_DashClient *dash, GF_
 		base_group->max_bitrate = 0;
 		base_group->min_bitrate = (u32)-1;
 
+		if (group->max_cached_segments!=0){
+			char *tmp = gf_malloc(strlen(new_base_seg_url)+17);
+			GF_LOG(GF_LOG_ERROR, GF_LOG_DASH, ("[DASH] 현재 캐시: (%u/%u/%u)\n",base_group->nb_cached_segments+1, base_group->ac_cached_segments,base_group->max_cached_segments));
+			sprintf(tmp,"%s?cache=%03d%03d%03d\0",new_base_seg_url,group->nb_cached_segments,group->ac_cached_segments,group->max_cached_segments);//할당된 캐시000 004 000
+			gf_free(new_base_seg_url);
+			new_base_seg_url=tmp;
+			//GF_LOG(GF_LOG_DEBUG, GF_LOG_DASH, ("to change %s\n", new_base_seg_url));
+		}
+
 		/*use persistent connection for segment downloads*/
 		if (use_byterange) {
 			e = gf_dash_download_resource(dash, &(base_group->segment_download), new_base_seg_url, start_range, end_range, 1, base_group);
@@ -5814,7 +5857,7 @@ static DownloadGroupStatus dash_download_group_download(GF_DashClient *dash, GF_
 	if (local_file_name && (e == GF_OK || group->segment_must_be_streamed )) {
 		gf_mx_p(group->cache_mutex);
 
-		assert(base_group->nb_cached_segments<base_group->max_cached_segments);
+		assert(base_group->nb_cached_segments<base_group->ac_cached_segments);
 		assert(local_file_name);
 
 		if (!empty_file) {
@@ -5840,7 +5883,7 @@ static DownloadGroupStatus dash_download_group_download(GF_DashClient *dash, GF_
 				cache_entry->start_range = start_range;
 				cache_entry->end_range = end_range;
 			}
-			GF_LOG(GF_LOG_DEBUG, GF_LOG_DASH, ("[DASH] Added file to cache (%u/%u in cache): %s\n", base_group->nb_cached_segments+1, base_group->max_cached_segments, cache_entry->url));
+			GF_LOG(GF_LOG_DEBUG, GF_LOG_DASH, ("[DASH] Added file to cache (%u/%u in cache): %s\n", base_group->nb_cached_segments+1, base_group->ac_cached_segments, cache_entry->url));
 
 			base_group->nb_cached_segments++;
 			gf_dash_update_buffering(group, dash);
@@ -6343,7 +6386,7 @@ restart_period:
 						gf_dash_group_check_time(group);
 					}
 					//cache is full, notify client some segments are pending
-					if ((group->nb_cached_segments == group->max_cached_segments)
+					if ((group->nb_cached_segments == group->ac_cached_segments)
 						&& !dash->request_period_switch
 						&& !group->has_pending_enhancement
 					) {
@@ -6354,7 +6397,7 @@ restart_period:
 						dash->dash_io->on_dash_event(dash->dash_io, GF_DASH_EVENT_SEGMENT_AVAILABLE, i, GF_OK);
 					}
 
-					if (group->nb_cached_segments<group->max_cached_segments) {
+					if (group->nb_cached_segments<group->ac_cached_segments) {
 						cache_full = 0;
 					}
 					if (group->rate_adaptation_postponed)
@@ -7242,7 +7285,7 @@ void gf_dash_switch_quality(GF_DashClient *dash, Bool switch_up, Bool immediate_
 			}
 		}
 		if (switch_to_rep_idx && (switch_to_rep_idx-1 != current_idx) ) {
-			u32 nb_cached_seg_per_rep = group->max_cached_segments / gf_dash_group_count_rep_needed(group);
+			u32 nb_cached_seg_per_rep = group->ac_cached_segments / gf_dash_group_count_rep_needed(group);
 
 			gf_mx_p(group->cache_mutex);
 
@@ -7343,7 +7386,7 @@ void gf_dash_switch_quality(GF_DashClient *dash, Bool switch_up, Bool immediate_
 				}
 			}
 			/*resize max cached segment*/
-			group->max_cached_segments = nb_cached_seg_per_rep * gf_dash_group_count_rep_needed(group);
+			group->ac_cached_segments = nb_cached_seg_per_rep * gf_dash_group_count_rep_needed(group);
 
 			if (group->srd_desc)
 				gf_dash_set_tiles_quality(dash, group->srd_desc);
@@ -7635,7 +7678,7 @@ GF_EXPORT
 u32 gf_dash_group_get_max_segments_in_cache(GF_DashClient *dash, u32 idx)
 {
 	GF_DASH_Group *group = gf_list_get(dash->groups, idx);
-	return group->max_cached_segments;
+	return group->ac_cached_segments;
 }
 
 
